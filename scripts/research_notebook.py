@@ -140,6 +140,25 @@ def _err(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
 
 
+def _as_public_dict(result):
+    """Normalize a research API return value into the historical dict shape.
+
+    notebooklm-py dropped the dict-subscript back-compat bridge in v0.8.0
+    (upstream issue #1251): `research.start()` now returns a `ResearchStart`
+    dataclass and `research.poll()` a `ResearchTask`. This script was written
+    against the dict API and reads `.get("task_id")`, `.get("status")`,
+    `.get("sources")` throughout.
+
+    Both dataclasses kept `to_public_dict()`, which rebuilds exactly that shape,
+    so converting once at the boundary leaves every line below unchanged — and
+    still works on pre-0.8.0, where these calls already returned dicts.
+    """
+    if result is None:
+        return {}
+    to_public = getattr(result, "to_public_dict", None)
+    return to_public() if callable(to_public) else result
+
+
 def _source_url(source_obj) -> str | None:
     """Normalize a Source dataclass or dict into its URL (or None)."""
     if source_obj is None:
@@ -186,11 +205,13 @@ async def _run_research(args: argparse.Namespace) -> int:
             f"Starting {args.mode} {args.source} research on notebook "
             f"{args.notebook_id}: {args.query[:80]}"
         )
-        start_result = await client.research.start(
-            args.notebook_id,
-            args.query,
-            source=args.source,
-            mode=args.mode,
+        start_result = _as_public_dict(
+            await client.research.start(
+                args.notebook_id,
+                args.query,
+                source=args.source,
+                mode=args.mode,
+            )
         )
         if not start_result or not isinstance(start_result, dict):
             _err(f"research.start returned unexpected payload: {start_result!r}")
@@ -207,7 +228,7 @@ async def _run_research(args: argparse.Namespace) -> int:
         status_dict: dict = {}
         adopted_task_id = False
         while True:
-            status_dict = await client.research.poll(args.notebook_id) or {}
+            status_dict = _as_public_dict(await client.research.poll(args.notebook_id))
             # Guard: make sure we are tracking the task we started, not a
             # stale/concurrent one. The poll endpoint may return state for a
             # different task_id (e.g. if the notebook had a prior research run
