@@ -202,6 +202,31 @@ def main() -> None:
     else:
         log("notebooklm-py is already importable — skipping pip install")
 
+    # ── Step 1b: install the repo's own dependencies ──────────────────────────
+    # Step 1 installs the NotebookLM client and nothing else, which is enough to
+    # log in and enough to run fetch_notebook.py — and not enough for anything
+    # downstream of it. In a fresh venv `process_notebook.py` fetches the notes,
+    # writes the staging JSON, then dies on `import yaml` in atomize.py, after
+    # the slow part has already run. Installing requirements.txt into the SAME
+    # interpreter closes that gap at setup time instead.
+    requirements = Path(__file__).resolve().parent.parent / "requirements.txt"
+    if requirements.is_file():
+        pip_cmd = [sys.executable, "-m", "pip", "install"]
+        if not in_venv():
+            pip_cmd.append("--user")
+        pip_cmd.extend(["-r", str(requirements)])
+        log(f"Installing repo requirements from {requirements.name}...")
+        rc = run_checked(pip_cmd, desc="pip install -r requirements.txt")
+        if rc != 0:
+            err(
+                "Failed to install the repo requirements. The NotebookLM login will\n"
+                "still work, but the processing pipeline will not. Try manually:\n"
+                f"  {sys.executable} -m pip install -r {requirements}"
+            )
+            sys.exit(1)
+    else:
+        log(f"No requirements.txt at {requirements} — skipping")
+
     # ── Step 2: install Playwright Chromium ───────────────────────────────────
     # Safe to re-run; playwright will skip if the browser is already present.
     log("Ensuring Playwright Chromium is installed...")
