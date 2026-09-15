@@ -22,10 +22,14 @@ This script takes that escape hatch: it drives the research flow through the
 so duplication literally cannot happen. It also exposes a `dedupe` subcommand
 for cleaning up notebooks that have already been poisoned by the CLI bug.
 
-Note on task_id mismatch: NotebookLM sometimes assigns a different task_id in
-`research.poll()` than the one returned by `research.start()` for the same
-operation. The poll loop handles this by comparing the query text — if it
-matches our request, we adopt the polled task_id and proceed normally.
+Note on the two identifiers: `research.start()` returns BOTH an opaque base64
+`task_id` and a UUID `report_id`, and `poll()` / `import_sources()` answer to the
+UUID. NotebookLM is not reassigning anything — an earlier reading of this as a
+"task_id mismatch" led to the poll being left unpinned and reconciled by query
+text instead, which breaks outright once a notebook has more than one research
+run in its history (`AmbiguousResearchTaskError`, and a completed task never
+leaves the in-flight list). The run is addressed by `report_id`; the query-match
+adoption below is kept only as a safety net.
 
 Usage
 -----
