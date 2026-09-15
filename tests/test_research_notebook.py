@@ -106,3 +106,117 @@ class TestBackCompatAndEdges:
     def test_none_becomes_an_empty_dict(self) -> None:
         """The poll call used to be guarded by `or {}` — that guard moved in here."""
         assert _as_public_dict(None) == {}
+
+
+class _FakeResearchAPI:
+    """Records how the run was addressed. Refuses an unpinned poll, as 0.8 does."""
+
+    def __init__(self, start_result) -> None:
+        self._start_result = start_result
+        self.polled_with: list[str | None] = []
+
+    async def start(self, notebook_id, query, *, source, mode):
+        return self._start_result
+
+    async def poll(self, notebook_id, task_id=None):
+        self.polled_with.append(task_id)
+        if task_id is None:
+            # Stands in for AmbiguousResearchTaskError: once a notebook has more
+            # than one research run in its history, an unpinned poll cannot pick.
+            raise AssertionError("poll was not pinned to a run id")
+        return ResearchTask(
+            task_id=task_id, status=ResearchStatus.COMPLETED, query=self._start_result.query
+        )
+
+
+class _FakeSourcesAPI:
+    async def list(self, notebook_id):
+        return []
+
+
+class _FakeClient:
+    def __init__(self, start_result) -> None:
+        self.research = _FakeResearchAPI(start_result)
+        self.sources = _FakeSourcesAPI()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class TestPollIsPinnedToTheRunId:
+    """The run is addressed by `report_id`, and the poll is always pinned.
+
+    Two separate failures ride on this. Unpinned, `poll()` raises
+    `AmbiguousResearchTaskError` as soon as the notebook has more than one
+    research task in its history — and a COMPLETED task stays in that list, so
+    the second research run on any notebook breaks the first. Pinned to the
+    wrong id, the poll reports `not_found` and the loop spins until timeout.
+    """
+
+    def _run(self, *, task_id: str, report_id: str | None):
+        import asyncio
+        from argparse import Namespace
+
+        import scripts.research_notebook as rn
+
+        started = ResearchStart(
+            task_id=task_id,
+            report_id=report_id,
+            notebook_id="nb-1",
+            query="q",
+            mode="deep",
+        )
+        captured: dict = {}
+
+        class _Factory:
+            @staticmethod
+            async def from_storage(**kwargs):
+                client = _FakeClient(started)
+                captured["client"] = client
+                return client
+
+        original = rn._import_notebooklm_client
+        rn._import_notebooklm_client = lambda: _Factory
+        try:
+            rc = asyncio.run(
+                rn._run_research(
+                    Namespace(
+                        notebook_id="nb-1",
+                        query="q",
+                        mode="deep",
+                        source="web",
+                        max_sources=None,
+                        poll_interval=0,
+                        poll_timeout=5,
+                        profile=None,
+                        dry_run=False,
+                        non_interactive=True,
+                    )
+                )
+            )
+        finally:
+            rn._import_notebooklm_client = original
+        return rc, captured["client"].research.polled_with
+
+    def test_report_id_is_what_the_poll_is_pinned_to(self) -> None:
+        """start() hands back an opaque base64 task_id and a UUID report_id.
+
+        The UUID is the one the poll answers to — observed live 15.09: start()
+        returned report_id 'b94fc1dc-…' and that exact string was the task_id
+        the poll reported back.
+        """
+        rc, polled = self._run(
+            task_id="ChAwM2NmNTc1ODIzOTM1OTUxEAgaBDBjODgqA3Vzdw",
+            report_id="9d81af13-eae6-4869-b894-d035683ac196",
+        )
+        assert rc == 0
+        assert polled == ["9d81af13-eae6-4869-b894-d035683ac196"]
+
+    def test_poll_falls_back_to_task_id_when_no_report_id(self) -> None:
+        """Still pinned — never unpinned — when the payload carries no report_id."""
+        rc, polled = self._run(task_id="task-only", report_id=None)
+        assert rc == 0
+        assert polled == ["task-only"]

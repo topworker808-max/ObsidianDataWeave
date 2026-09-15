@@ -220,6 +220,19 @@ async def _run_research(args: argparse.Namespace) -> int:
         if not task_id:
             _err(f"research.start did not return a task_id (got: {start_result!r})")
             return 1
+
+        # `poll()` and `import_sources()` address a run by the UUID that start()
+        # returns as `report_id`, not by its `task_id` (an opaque base64 handle).
+        # That is the whole of the "task_id mismatch" described in this module's
+        # header: the polled id is not a second id for the same run, it is the
+        # report id. Pinning the poll to it also keeps a concurrent run from
+        # making the poll ambiguous — notebooklm-py >= 0.8 raises
+        # AmbiguousResearchTaskError rather than picking one when several
+        # research tasks are in flight and no id is supplied.
+        run_id = start_result.get("report_id") or task_id
+        if run_id != task_id:
+            _log(f"start() returned task_id={task_id!r}; addressing the run by report_id={run_id!r}")
+        task_id = run_id
         _log(f"Research task_id={task_id}; polling every {args.poll_interval}s "
              f"(timeout {args.poll_timeout}s)")
 
@@ -228,7 +241,9 @@ async def _run_research(args: argparse.Namespace) -> int:
         status_dict: dict = {}
         adopted_task_id = False
         while True:
-            status_dict = _as_public_dict(await client.research.poll(args.notebook_id))
+            status_dict = _as_public_dict(
+                await client.research.poll(args.notebook_id, task_id)
+            )
             # Guard: make sure we are tracking the task we started, not a
             # stale/concurrent one. The poll endpoint may return state for a
             # different task_id (e.g. if the notebook had a prior research run
